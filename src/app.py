@@ -10,7 +10,7 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.tools import Tool
 from langchain_classic.agents import create_react_agent, AgentExecutor
 from langchain_classic.memory import ConversationBufferMemory
-from langchain import hub
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +22,28 @@ REPORTES_DIR = "reportes"
 os.makedirs(REPORTES_DIR, exist_ok=True)
 
 st.set_page_config(page_title="Consultor Ciberseguridad Ley 21.663", layout="wide")
+
+REACT_TEMPLATE = """Eres un asistente experto en ciberseguridad y legislación chilena.
+Tienes acceso a las siguientes herramientas:
+
+{tools}
+
+Usa el siguiente formato:
+
+Question: la pregunta de entrada que debes responder
+Thought: siempre debes pensar qué hacer
+Action: la acción a tomar, debe ser una de [{tool_names}]
+Action Input: el input para la acción
+Observation: el resultado de la acción
+... (este ciclo Thought/Action/Action Input/Observation puede repetirse N veces)
+Thought: Ahora sé la respuesta final
+Final Answer: la respuesta final a la pregunta original
+
+Historial de conversación:
+{chat_history}
+
+Question: {input}
+Thought: {agent_scratchpad}"""
 
 
 @st.cache_resource
@@ -39,8 +61,13 @@ def load_components():
     retriever = db.as_retriever(search_kwargs={"k": 3})
     llm = OllamaLLM(model="llama3.2:1b", temperature=0.1)
 
-    # ── HERRAMIENTA 1: Consulta normativa (RAG) ─────────────────────────────
-    rag_template = """CONTEXTO LEGAL AUTORIZADO:\n{context}\n\nCONSULTA: {question}\n\nResponde nivel ingeniero TI. Cita el Artículo y la Ley. Finaliza con: 'Esta interpretación no sustituye asesoría legal formal.'"""
+    # ── HERRAMIENTA 1: Consulta normativa (RAG) ─────────────────────────
+    rag_template = """CONTEXTO LEGAL AUTORIZADO:
+{context}
+
+CONSULTA: {question}
+
+Responde nivel ingeniero TI. Cita el Artículo y la Ley. Finaliza con: 'Esta interpretación no sustituye asesoría legal formal.'"""
     rag_prompt = PromptTemplate.from_template(rag_template)
 
     def format_docs(docs):
@@ -56,7 +83,7 @@ def load_components():
     def buscador_normativo(query: str) -> str:
         return rag_chain.invoke(query)
 
-    # ── HERRAMIENTA 2: Guardar reporte ──────────────────────────────────────
+    # ── HERRAMIENTA 2: Guardar reporte ──────────────────────────────────
     def guardar_reporte(entrada: str) -> str:
         """Guarda un reporte en /reportes/. Input: 'nombre_archivo|contenido'"""
         if "|" in entrada:
@@ -76,7 +103,7 @@ def load_components():
             f.write(contenido.strip())
         return f"Reporte guardado exitosamente en '{ruta}'."
 
-    # ── HERRAMIENTA 3: Evaluar cumplimiento ─────────────────────────────────
+    # ── HERRAMIENTA 3: Evaluar cumplimiento ──────────────────────────────
     def evaluar_cumplimiento(descripcion: str) -> str:
         """Evalúa si un sistema/proceso cumple con la Ley 21.663."""
         prompt_eval = f"""Eres un auditor experto en Ley 21.663 de Ciberseguridad de Chile.
@@ -91,7 +118,7 @@ JUSTIFICACIÓN: [Explicación técnica-legal citando artículos relevantes]
 RECOMENDACIONES: [Acciones concretas si aplica]"""
         return llm.invoke(prompt_eval)
 
-    # ── Construcción del agente ReAct ────────────────────────────────────────
+    # ── Construcción del agente ReAct ────────────────────────────────────
     herramientas = [
         Tool(
             name="buscador_normativo",
@@ -110,8 +137,8 @@ RECOMENDACIONES: [Acciones concretas si aplica]"""
         ),
     ]
 
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    react_prompt = hub.pull("hwchase17/react-chat")
+    react_prompt = PromptTemplate.from_template(REACT_TEMPLATE)
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=False)
     agent = create_react_agent(llm=llm, tools=herramientas, prompt=react_prompt)
     agent_executor = AgentExecutor(
         agent=agent,
