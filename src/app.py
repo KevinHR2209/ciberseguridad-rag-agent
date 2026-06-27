@@ -7,10 +7,13 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
-from langchain.tools import Tool
+from langchain_core.tools import Tool
 from langchain.agents import create_react_agent, AgentExecutor
 from langchain.memory import ConversationBufferMemory
 from langchain import hub
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.observability import registrar_metricas
 from src.security import sanitizar_input, verificar_rate_limit, generar_session_id, validar_nombre_archivo
@@ -140,7 +143,7 @@ if "session_id" not in st.session_state:
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).markdown(msg["content"])
 
-if user_input := st.chat_input("Ej: ¿Cuál es el plazo para reportar una filtración de datos?"):
+if user_input := st.chat_input("¿Cuál es el plazo para reportar una filtración de datos?"):
     permitido, msg_limite = verificar_rate_limit(st.session_state.session_id)
     if not permitido:
         st.warning(msg_limite)
