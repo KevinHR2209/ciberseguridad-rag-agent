@@ -7,10 +7,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
-from langchain_core.tools import Tool
-from langchain_classic.agents import create_react_agent, AgentExecutor
-from langchain_classic.memory import ConversationBufferMemory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,28 +19,6 @@ os.makedirs(REPORTES_DIR, exist_ok=True)
 
 st.set_page_config(page_title="Consultor Ciberseguridad Ley 21.663", layout="wide")
 
-REACT_TEMPLATE = """Eres un asistente experto en ciberseguridad y legislación chilena.
-Tienes acceso a las siguientes herramientas:
-
-{tools}
-
-Usa el siguiente formato:
-
-Question: la pregunta de entrada que debes responder
-Thought: siempre debes pensar qué hacer
-Action: la acción a tomar, debe ser una de [{tool_names}]
-Action Input: el input para la acción
-Observation: el resultado de la acción
-... (este ciclo Thought/Action/Action Input/Observation puede repetirse N veces)
-Thought: Ahora sé la respuesta final
-Final Answer: la respuesta final a la pregunta original
-
-Historial de conversación:
-{chat_history}
-
-Question: {input}
-Thought: {agent_scratchpad}"""
-
 
 @st.cache_resource
 def load_components():
@@ -52,22 +26,19 @@ def load_components():
         model_name="sentence-transformers/all-MiniLM-L6-v2",
         model_kwargs={'device': 'cpu'}
     )
-
     if not os.path.exists("faiss_index"):
         st.error("No se encontró el índice FAISS. Ejecuta 'python src/ingest.py' primero.")
         st.stop()
-
     db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
     retriever = db.as_retriever(search_kwargs={"k": 3})
     llm = OllamaLLM(model="llama3.2:1b", temperature=0.1)
 
-    # ── HERRAMIENTA 1: Consulta normativa (RAG) ─────────────────────────
     rag_template = """CONTEXTO LEGAL AUTORIZADO:
 {context}
 
 CONSULTA: {question}
 
-Responde nivel ingeniero TI. Cita el Artículo y la Ley. Finaliza con: 'Esta interpretación no sustituye asesoría legal formal.'"""
+Responde en español, nivel ingeniero TI. Cita el Artículo y la Ley. Sé conciso (máximo 200 palabras). Finaliza con: 'Esta interpretación no sustituye asesoría legal formal.'"""
     rag_prompt = PromptTemplate.from_template(rag_template)
 
     def format_docs(docs):
@@ -80,78 +51,42 @@ Responde nivel ingeniero TI. Cita el Artículo y la Ley. Finaliza con: 'Esta int
         | StrOutputParser()
     )
 
-    def buscador_normativo(query: str) -> str:
-        return rag_chain.invoke(query)
+    eval_template = """Eres auditor experto en Ley 21.663 de Ciberseguridad de Chile.
+Sistema/proceso a evaluar: {descripcion}
 
-    # ── HERRAMIENTA 2: Guardar reporte ──────────────────────────────────
-    def guardar_reporte(entrada: str) -> str:
-        """Guarda un reporte en /reportes/. Input: 'nombre_archivo|contenido'"""
-        if "|" in entrada:
-            nombre, contenido = entrada.split("|", 1)
-        else:
-            nombre = f"reporte_{int(time.time())}"
-            contenido = entrada
-
-        valido, nombre_limpio = validar_nombre_archivo(nombre.strip())
-        if not valido:
-            return f"Error: {nombre_limpio}"
-        if not nombre_limpio.endswith(".txt"):
-            nombre_limpio += ".txt"
-
-        ruta = os.path.join(REPORTES_DIR, nombre_limpio)
-        with open(ruta, "w", encoding="utf-8") as f:
-            f.write(contenido.strip())
-        return f"Reporte guardado exitosamente en '{ruta}'."
-
-    # ── HERRAMIENTA 3: Evaluar cumplimiento ──────────────────────────────
-    def evaluar_cumplimiento(descripcion: str) -> str:
-        """Evalúa si un sistema/proceso cumple con la Ley 21.663."""
-        prompt_eval = f"""Eres un auditor experto en Ley 21.663 de Ciberseguridad de Chile.
-
-Descripción del sistema o proceso a evaluar:
-{descripcion}
-
-Evalúa el cumplimiento y responde EXCLUSIVAMENTE con este formato:
+Responde EXCLUSIVAMENTE con este formato (máximo 150 palabras):
 VEREDICTO: [CUMPLE / INCUMPLE / REQUIERE_REVISIÓN]
 NIVEL_RIESGO: [ALTO / MEDIO / BAJO]
-JUSTIFICACIÓN: [Explicación técnica-legal citando artículos relevantes]
-RECOMENDACIONES: [Acciones concretas si aplica]"""
-        return llm.invoke(prompt_eval)
+JUSTIFICACIÓN: [cita artículos relevantes]
+RECOMENDACIONES: [acciones concretas]"""
+    eval_prompt = PromptTemplate.from_template(eval_template)
+    eval_chain = eval_prompt | llm | StrOutputParser()
 
-    # ── Construcción del agente ReAct ────────────────────────────────────
-    herramientas = [
-        Tool(
-            name="buscador_normativo",
-            func=buscador_normativo,
-            description="Busca y responde consultas sobre la Ley 21.663, Ley 21.459, Ley 21.719 y Ley 19.628. Úsala para preguntas sobre artículos, plazos, obligaciones y sanciones.",
-        ),
-        Tool(
-            name="guardar_reporte",
-            func=guardar_reporte,
-            description="Guarda un reporte técnico en disco. Input: 'nombre_archivo|contenido del reporte'. Úsala cuando el usuario pide generar o guardar un informe.",
-        ),
-        Tool(
-            name="evaluar_cumplimiento",
-            func=evaluar_cumplimiento,
-            description="Evalúa si un sistema, proceso o configuración cumple con la Ley 21.663. Retorna CUMPLE/INCUMPLE/REQUIERE_REVISIÓN con justificación. Input: descripción del sistema.",
-        ),
-    ]
-
-    react_prompt = PromptTemplate.from_template(REACT_TEMPLATE)
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=False)
-    agent = create_react_agent(llm=llm, tools=herramientas, prompt=react_prompt)
-    agent_executor = AgentExecutor(
-        agent=agent,
-        tools=herramientas,
-        memory=memory,
-        verbose=True,
-        handle_parsing_errors=True,
-        max_iterations=5,
-    )
-
-    return agent_executor, retriever
+    return rag_chain, eval_chain, llm
 
 
+def detectar_herramienta(query: str) -> str:
+    q = query.lower()
+    if any(p in q for p in ["evalúa", "cumple", "cumplimiento", "verifica", "audita", "revisa si"]):
+        return "evaluar_cumplimiento"
+    if any(p in q for p in ["guarda", "genera reporte", "crea reporte", "guardar", "informe"]):
+        return "guardar_reporte"
+    return "buscador_normativo"
+
+
+def guardar_reporte_txt(nombre: str, contenido: str) -> str:
+    valido, nombre_limpio = validar_nombre_archivo(nombre.strip())
+    if not valido:
+        return f"Error: {nombre_limpio}"
+    if not nombre_limpio.endswith(".txt"):
+        nombre_limpio += ".txt"
+    ruta = os.path.join(REPORTES_DIR, nombre_limpio)
+    with open(ruta, "w", encoding="utf-8") as f:
+        f.write(contenido)
+    return f"✅ Reporte guardado en '{ruta}'."
+
+
+# ── UI ─────────────────────────────────────────────────────────────
 st.title("⚖️ Consultor Técnico-Legal Ciberseguridad")
 st.caption("Agente RAG + 3 herramientas | Ley 21.663 Chile | EP3 ISY0101")
 
@@ -159,7 +94,18 @@ col1, col2 = st.columns([3, 1])
 with col2:
     st.markdown("[📊 Ver Dashboard](http://localhost:8502)", unsafe_allow_html=True)
 
-agent_executor, retriever = load_components()
+with st.sidebar:
+    st.markdown("### 🔧 Herramientas disponibles")
+    st.markdown("- 🔍 **buscador_normativo** \u2014 consultas legales RAG")
+    st.markdown("- 📊 **evaluar_cumplimiento** \u2014 auditoría de sistemas")
+    st.markdown("- 💾 **guardar_reporte** \u2014 genera informe en disco")
+    st.divider()
+    st.markdown("**Ejemplos rápidos:**")
+    st.markdown("👉 *¿Plazo para reportar filtración?*")
+    st.markdown("👉 *Evalúa si logs sin cifrado cumplen Ley 21.663*")
+    st.markdown("👉 *Genera reporte sobre obligaciones CISO*")
+
+rag_chain, eval_chain, llm = load_components()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -177,26 +123,32 @@ if user_input := st.chat_input("¿Cuál es el plazo para reportar una filtració
         st.stop()
 
     query_limpia, alertas = sanitizar_input(user_input)
-    if alertas:
-        for alerta in alertas:
-            st.warning(f"⚠️ Seguridad: {alerta}")
+    for alerta in alertas:
+        st.warning(f"⚠️ Seguridad: {alerta}")
 
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.chat_message("user").markdown(user_input)
 
-    with st.spinner("Procesando con el agente..."):
+    herramienta = detectar_herramienta(query_limpia)
+
+    with st.spinner(f"Procesando con **{herramienta}**..."):
         inicio = time.time()
         error_msg = None
         respuesta = ""
-        herramienta_usada = "buscador_normativo"
 
         try:
-            resultado = agent_executor.invoke({"input": query_limpia})
-            respuesta = resultado.get("output", "Sin respuesta.")
-            if "guardar_reporte" in str(resultado):
-                herramienta_usada = "guardar_reporte"
-            elif "evaluar_cumplimiento" in str(resultado):
-                herramienta_usada = "evaluar_cumplimiento"
+            if herramienta == "evaluar_cumplimiento":
+                respuesta = eval_chain.invoke({"descripcion": query_limpia})
+
+            elif herramienta == "guardar_reporte":
+                contenido_reporte = rag_chain.invoke(query_limpia)
+                nombre = f"reporte_{int(time.time())}"
+                msg_guardado = guardar_reporte_txt(nombre, contenido_reporte)
+                respuesta = f"{contenido_reporte}\n\n---\n{msg_guardado}"
+
+            else:  # buscador_normativo
+                respuesta = rag_chain.invoke(query_limpia)
+
         except Exception as e:
             error_msg = str(e)
             respuesta = f"Error procesando la consulta: {e}"
@@ -207,7 +159,7 @@ if user_input := st.chat_input("¿Cuál es el plazo para reportar una filtració
         query=query_limpia,
         respuesta=respuesta,
         latencia=latencia,
-        herramienta_usada=herramienta_usada,
+        herramienta_usada=herramienta,
         error=error_msg,
     )
 
@@ -216,5 +168,6 @@ if user_input := st.chat_input("¿Cuál es el plazo para reportar una filtració
 
     with st.sidebar:
         st.metric("⏱️ Latencia última consulta", f"{latencia}s")
+        st.info(f"🔧 Herramienta: `{herramienta}`")
         if error_msg:
             st.error(f"Error: {error_msg}")
