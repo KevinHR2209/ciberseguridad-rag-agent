@@ -8,8 +8,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.tools import Tool
-from langchain.agents import create_react_agent, AgentExecutor
-from langchain.memory import ConversationBufferMemory
+from langchain_classic.agents import create_react_agent, AgentExecutor
+from langchain_classic.memory import ConversationBufferMemory
 from langchain import hub
 
 import sys
